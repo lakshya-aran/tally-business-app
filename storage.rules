@@ -1,0 +1,47 @@
+rules_version = '2';
+
+// Clients authenticate to Firebase with a custom token minted by our API
+// (POST /api/storage/token): request.auth.uid = our user id,
+// request.auth.token.acct = the user's account (tenant) id.
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function signedIn() { return request.auth != null; }
+    function inAccount(acct) { return signedIn() && request.auth.token.acct == acct; }
+    function isImage() { return request.resource.contentType.matches('image/(jpeg|png|webp)'); }
+    function isPdf() { return request.resource.contentType == 'application/pdf'; }
+    function isOffice() {
+      return request.resource.contentType in [
+        'text/csv',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+      ];
+    }
+    function under(mb) { return request.resource.size < mb * 1024 * 1024; }
+
+    // Profile photos: only the owner may write; any signed-in user may read.
+    match /users/{uid}/avatar/{file} {
+      allow read: if signedIn();
+      allow create, update: if signedIn() && request.auth.uid == uid && isImage() && under(2);
+      allow delete: if false; // deletions go through the API
+    }
+
+    // Company files: confined to the uploader's own account.
+    match /accounts/{acct}/companies/{companyId}/{folder}/{file} {
+      allow read: if inAccount(acct);
+      allow create, update: if inAccount(acct) && (
+        (folder == 'logos'     && isImage() && under(2)) ||
+        (folder == 'products'  && isImage() && under(5)) ||
+        (folder == 'invoices'  && isPdf() && under(10)) ||
+        (folder == 'expenses'  && (isImage() || isPdf()) && under(10)) ||
+        (folder == 'documents' && (isImage() || isPdf() || isOffice()) && under(20))
+      );
+      allow delete: if false;
+    }
+
+    // Everything else is closed.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
